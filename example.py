@@ -21,9 +21,9 @@ async def test() -> None:
     ) as client_session:
         # Specify the Traccar demo server URL without the protocol prefix
         client = ApiClient(
-            host="demo.traccar.org",
-            username="kiruthika@pinesphere.com",  # Traccar demo server username
-            password="Kiruthi@12",  # Traccar demo server password
+            host="46.101.24.212",
+            username="traccar123@gmail.com",  # Traccar demo server username
+            password="traccar@123",  # Traccar demo server password
             client_session=client_session,
         )
 
@@ -56,7 +56,7 @@ async def test() -> None:
                 )
             else:
                 logging.warning(
-                    "Incomplete location information for location: %s", location
+                    "Location information: %s", location
                 )
 
 
