@@ -56,7 +56,7 @@ class PositionModel(TypedDict):
 
 async def connect_to_database():
     conn = await aiomysql.connect(
-        host='127.0.0.1',
+        host='localhost',
         port=3306,
         user='root',
         password='Kiruthi@12',
@@ -141,7 +141,7 @@ async def insert_server_info(conn, server):
                 server["id"], server["registration"], server["readonly"], server["deviceReadonly"],
                 server["limitCommands"], server["map"], server["bingKey"], server["mapUrl"],
                 server["poiLayer"], server["latitude"], server["longitude"], server["zoom"],
-                server["twelveHourFormat"], server["version"], server["forceSettings"],
+                server.get("twelveHourFormat", False), server["version"], server["forceSettings"],
                 server["coordinateFormat"], json.dumps(server["attributes"]),
                 server["openIdEnabled"], server["openIdForce"]
             ))
@@ -152,6 +152,7 @@ async def insert_server_info(conn, server):
                 logging.error(f"Failed to insert server {server['id']}: {e}")
         except Exception as e:
             logging.error(f"Failed to insert server {server['id']}: {e}")
+
 
 async def insert_device_info(conn, device):
     async with conn.cursor() as cur:
