@@ -1,61 +1,12 @@
-import asyncio
+import json
 import logging
 import aiomysql
-import aiohttp
-from pytraccar import ApiClient
-import json
-from typing import Any, TypedDict
+import asyncio
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    handlers=[logging.StreamHandler()],
-)
+logging.basicConfig(level=logging.INFO)
 
-class ServerModel(TypedDict):
-    id: int
-    registration: bool
-    readonly: bool
-    deviceReadonly: bool
-    limitCommands: bool
-    map: str | None
-    bingKey: str | None
-    mapUrl: str | None
-    poiLayer: str | None
-    latitude: float
-    longitude: float
-    zoom: int
-    twelveHourFormat: bool
-    version: str
-    forceSettings: bool
-    coordinateFormat: str | None
-    attributes: dict[str, Any]
-    openIdEnabled: bool
-    openIdForce: bool
-
-class PositionModel(TypedDict):
-    id: int
-    deviceId: int
-    protocol: str
-    deviceTime: str
-    fixTime: str
-    serverTime: str
-    outdated: bool
-    valid: bool
-    latitude: float
-    geofenceIds: list[int] | None
-    longitude: float
-    altitude: int
-    speed: int
-    course: int
-    address: str | None
-    accuracy: int
-    network: dict[str, Any] | None
-    attributes: dict[str, Any]
-
-async def connect_to_database():
-    conn = await aiomysql.connect(
+async def create_pool():
+    return await aiomysql.create_pool(
         host='localhost',
         port=3306,
         user='root',
@@ -63,96 +14,15 @@ async def connect_to_database():
         db='pytraccar',
         autocommit=True
     )
-    return conn
 
-async def create_tables(conn):
+def format_datetime(dt_str):
+    return dt_str.replace('T', ' ').split('.')[0] if dt_str else None
+
+async def device_exists(conn, device_id):
     async with conn.cursor() as cur:
-        await cur.execute("""
-            CREATE TABLE IF NOT EXISTS servers (
-                id INT PRIMARY KEY,
-                registration BOOLEAN,
-                readonly BOOLEAN,
-                deviceReadonly BOOLEAN,
-                limitCommands BOOLEAN,
-                map VARCHAR(255),
-                bingKey VARCHAR(255),
-                mapUrl VARCHAR(255),
-                poiLayer VARCHAR(255),
-                latitude DECIMAL(10, 8),
-                longitude DECIMAL(11, 8),
-                zoom INT,
-                twelveHourFormat BOOLEAN,
-                version VARCHAR(255),
-                forceSettings BOOLEAN,
-                coordinateFormat VARCHAR(255),
-                attributes JSON,
-                openIdEnabled BOOLEAN,
-                openIdForce BOOLEAN
-            )
-        """)
-        await cur.execute("""
-            CREATE TABLE IF NOT EXISTS devices (
-                id INT PRIMARY KEY,
-                name VARCHAR(255),
-                unique_id VARCHAR(255),
-                status VARCHAR(255),
-                disabled BOOLEAN,
-                lastUpdate DATETIME,
-                positionId INT,
-                groupId INT,
-                phone VARCHAR(255),
-                model VARCHAR(255),
-                contact VARCHAR(255),
-                category VARCHAR(255),
-                attributes JSON
-            )
-        """)
-        await cur.execute("""
-            CREATE TABLE IF NOT EXISTS location_information (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                device_id INT,
-                protocol VARCHAR(255),
-                server_time DATETIME,
-                device_time DATETIME,
-                fix_time DATETIME,
-                outdated BOOLEAN,
-                valid BOOLEAN,
-                latitude DECIMAL(10, 8) NOT NULL,
-                longitude DECIMAL(11, 8) NOT NULL,
-                altitude DECIMAL(10, 2) NOT NULL,
-                speed DECIMAL(10, 2),
-                course DECIMAL(10, 2),
-                accuracy DECIMAL(10, 2),
-                FOREIGN KEY (device_id) REFERENCES devices(id)
-            )
-        """)
-
-async def insert_server_info(conn, server):
-    async with conn.cursor() as cur:
-        try:
-            logging.info(f"Inserting server info: {server}")
-            await cur.execute("""
-                INSERT INTO servers (
-                    id, registration, readonly, deviceReadonly, limitCommands, map, bingKey, mapUrl,
-                    poiLayer, latitude, longitude, zoom, twelveHourFormat, version, forceSettings,
-                    coordinateFormat, attributes, openIdEnabled, openIdForce
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, (
-                server["id"], server["registration"], server["readonly"], server["deviceReadonly"],
-                server["limitCommands"], server["map"], server["bingKey"], server["mapUrl"],
-                server["poiLayer"], server["latitude"], server["longitude"], server["zoom"],
-                server.get("twelveHourFormat", False), server["version"], server["forceSettings"],
-                server["coordinateFormat"], json.dumps(server["attributes"]),
-                server["openIdEnabled"], server["openIdForce"]
-            ))
-        except aiomysql.IntegrityError as e:
-            if e.args[0] == 1062:  # Duplicate entry error code
-                logging.warning(f"Server {server['id']} already exists in the database. Skipping insertion.")
-            else:
-                logging.error(f"Failed to insert server {server['id']}: {e}")
-        except Exception as e:
-            logging.error(f"Failed to insert server {server['id']}: {e}")
-
+        await cur.execute("SELECT COUNT(*) FROM devices WHERE id = %s", (device_id,))
+        (count,) = await cur.fetchone()
+        return count > 0
 
 async def insert_device_info(conn, device):
     async with conn.cursor() as cur:
@@ -164,7 +34,7 @@ async def insert_device_info(conn, device):
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (
                 device["id"], device["name"], device["uniqueId"], device["status"], device["disabled"],
-                device["lastUpdate"].replace('T', ' ').replace('Z', '') if device["lastUpdate"] else None,
+                format_datetime(device["lastUpdate"]),
                 device["positionId"], device["groupId"], device["phone"],
                 device["model"], device["contact"], device["category"], json.dumps(device["attributes"])
             ))
@@ -193,6 +63,11 @@ async def insert_location_info(conn, location):
 
             logging.info(f"Inserting location: {json.dumps(location)}")
 
+            # Check if the device exists
+            if not await device_exists(conn, location['deviceId']):
+                logging.error(f"Device {location['deviceId']} does not exist. Skipping insertion.")
+                return
+
             await cur.execute("""
                 INSERT INTO location_information 
                 (device_id, protocol, server_time, device_time, fix_time, outdated, valid, latitude, longitude, altitude, speed, course, accuracy) 
@@ -200,9 +75,9 @@ async def insert_location_info(conn, location):
             """, (
                 location['deviceId'],
                 location['protocol'],
-                location['serverTime'].replace('T', ' ').replace('.000+00:00', '') if location['serverTime'] else None,
-                location['deviceTime'].replace('T', ' ').replace('.000+00:00', '') if location['deviceTime'] else None,
-                location['fixTime'].replace('T', ' ').replace('.000+00:00', '') if location['fixTime'] else None,
+                format_datetime(location['serverTime']),
+                format_datetime(location['deviceTime']),
+                format_datetime(location['fixTime']),
                 location['outdated'],
                 location['valid'],
                 latitude,
@@ -216,7 +91,9 @@ async def insert_location_info(conn, location):
             logging.info(f"Successfully inserted location data for device ID: {location['deviceId']}")
 
         except aiomysql.IntegrityError as e:
-            if e.args[0] == 1062:  # Duplicate entry error code
+            if e.args[0] == 1452:  # Foreign key constraint fails
+                logging.error(f"Foreign key constraint failed for device {location['deviceId']}. Ensure the device ID exists in the devices table.")
+            elif e.args[0] == 1062:  # Duplicate entry error code
                 logging.warning(f"Location data for device {location['deviceId']} already exists in the database. Skipping insertion.")
             else:
                 logging.error(f"Failed to insert location data for device {location['deviceId']}: {e}")
@@ -224,30 +101,62 @@ async def insert_location_info(conn, location):
             logging.error(f"Failed to insert location data for device {location['deviceId']}: {e}")
 
 async def main():
-    conn = await connect_to_database()
-    await create_tables(conn)
+    pool = await create_pool()
 
-    async with aiohttp.ClientSession() as session:
-        api = ApiClient(username='traccar123@gmail.com', password='traccar@123', url='http://46.101.24.212:8082/api', host='46.101.24.212', client_session=session)
+    async with pool.acquire() as conn:
+        device = {
+            "id": 885,
+            "name": "Device 885",
+            "uniqueId": "unique-885",
+            "status": "online",
+            "disabled": False,
+            "lastUpdate": "2024-06-14T10:32:41.000+00:00",
+            "positionId": 1,
+            "groupId": 1,
+            "phone": "1234567890",
+            "model": "Model 885",
+            "contact": "contact@example.com",
+            "category": "vehicle",
+            "attributes": {}
+        }
 
-        try:
-            # Replace these method calls with the correct ones
-            server: ServerModel = await api.get_server()  # Assuming the method is get_server()
-            await insert_server_info(conn, server)
+        location = {
+            "id": 1849398,
+            "attributes": {
+                "status": "0100000000",
+                "odometer": 276613,
+                "rssi": 17,
+                "sat": 17,
+                "power": 12.6,
+                "statusExtended": "20100",
+                "adc1": 0.11,
+                "distance": 0.0,
+                "totalDistance": 0.0,
+                "motion": False
+            },
+            "deviceId": 885,
+            "protocol": "upro",
+            "serverTime": "2024-06-14T10:32:41.000+00:00",
+            "deviceTime": "2024-06-14T16:02:39.000+00:00",
+            "fixTime": "2024-06-14T16:02:39.000+00:00",
+            "outdated": False,
+            "valid": True,
+            "latitude": 11.216295,
+            "longitude": 77.80542666666666,
+            "altitude": 175.0,
+            "speed": 0.0,
+            "course": 60.0,
+            "address": None,
+            "accuracy": 0.0,
+            "network": None,
+            "geofenceIds": None
+        }
 
-            devices: list[dict[str, Any]] = await api.get_devices()  # Assuming the method is get_devices()
-            for device in devices:
-                await insert_device_info(conn, device)
+        await insert_device_info(conn, device)
+        await insert_location_info(conn, location)
 
-            positions: list[PositionModel] = await api.get_positions()  # Assuming the method is get_positions()
-            for position in positions:
-                await insert_location_info(conn, position)
-        except aiohttp.ClientError as e:
-            logging.error(f"HTTP request failed: {e}")
-        except Exception as e:
-            logging.error(f"An unexpected error occurred: {e}")
-        finally:
-            conn.close()
+    pool.close()
+    await pool.wait_closed()
 
 if __name__ == "__main__":
     asyncio.run(main())
